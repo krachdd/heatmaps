@@ -5,7 +5,7 @@
 
 **Parallel Finite-Difference Heat Conduction Solver for Porous Media**
 
-HEATMAPS computes the effective thermal conductivity $\lambda_\text{eff}$ of digitised porous-media geometries by solving the steady-state heat equation $\nabla \cdot (\lambda \nabla T) = 0$ with a parallel finite-difference pseudo-time relaxation scheme. The code is a scalar analogue of the [POREMAPS](https://github.com/davidkrach/poremaps) Stokes solver: a single temperature field $T$ replaces the four Stokes fields $(p, v_x, v_y, v_z)$, and $\lambda_\text{eff}$ is the scalar output analogous to permeability.
+HEATMAPS computes the effective thermal conductivity $\lambda_\text{eff}$ of digitised porous-media geometries by solving the steady-state heat equation $\nabla \cdot (\lambda \nabla T) = 0$ with a parallel finite-difference pseudo-time relaxation scheme. The code is a scalar analogue of the [POREMAPS](https://github.com/krachdd/poremaps) Stokes solver: a single temperature field $T$ replaces the four Stokes fields $(p, v_x, v_y, v_z)$, and $\lambda_\text{eff}$ is the scalar output analogous to permeability.
 
 ## Table of Contents
 
@@ -163,7 +163,7 @@ pytest tests/ -v --run-integration
 
 ## Relationship to POREMAPS Stokes Solver
 
-HEATMAPS is deliberately structured as a scalar analogue of the [POREMAPS](https://github.com/davidkrach/poremaps) Stokes solver. The modules `geometry`, `parallelization`, and `output` are identical copies.
+HEATMAPS is deliberately structured as a scalar analogue of the [POREMAPS](https://github.com/krachdd/poremaps) Stokes solver. The modules `geometry`, `parallelization`, and `output` are identical copies.
 
 | Concept | Stokes solver | Heat solver |
 |---|---|---|
