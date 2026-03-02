@@ -1,19 +1,11 @@
 # HEATMAPS
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
-[![CI](https://github.com/krachdd/heatmaps/actions/workflows/ci.yml/badge.svg)](https://github.com/krachdd/heatmaps/actions)
+[![Tests](https://github.com/krachdd/heatmaps/actions/workflows/tests.yml/badge.svg)](https://github.com/krachdd/heatmaps/actions)
 
 **Parallel Finite-Difference Heat Conduction Solver for Porous Media**
 
-HEATMAPS computes the effective thermal conductivity $\lambda_\text{eff}$ of
-digitised porous-media geometries by solving the steady-state heat equation
-$\nabla\!\cdot\!(\lambda\nabla T)=0$ with a parallel finite-difference
-pseudo-time relaxation scheme.
-
-The code is a scalar analogue of the
-[POREMAPS](https://github.com/davidkrach/poremaps) Stokes solver: a single
-temperature field $T$ replaces the four Stokes fields $(p, v_x, v_y, v_z)$,
-and $\lambda_\text{eff}$ is the scalar output analogous to permeability.
+HEATMAPS computes the effective thermal conductivity $\lambda_\text{eff}$ of digitised porous-media geometries by solving the steady-state heat equation $\nabla \cdot (\lambda \nabla T) = 0$ with a parallel finite-difference pseudo-time relaxation scheme. The code is a scalar analogue of the [POREMAPS](https://github.com/davidkrach/poremaps) Stokes solver: a single temperature field $T$ replaces the four Stokes fields $(p, v_x, v_y, v_z)$, and $\lambda_\text{eff}$ is the scalar output analogous to permeability.
 
 ## Table of Contents
 
@@ -58,16 +50,11 @@ make MPICXX=mpic++ CXXFLAGS="-O2 -std=c++17"
 ## How to Run
 
 ```bash
-# Single rank, using input_param.inp in the working directory
-mpirun -np 1  path/to/HEATMAPS
-
 # 8 ranks, custom input file
 mpirun -np 8  path/to/HEATMAPS my_input.inp
 ```
 
-The working directory must contain the input file and the geometry `.raw` file
-(or use absolute paths in the input file). Output files are written to the
-working directory.
+The working directory must contain the input file and the geometry `.raw` file (or use absolute paths in the input file). Output files are written to the working directory. 
 
 ---
 
@@ -90,7 +77,7 @@ Create an input file based on [`input_template.inp`](input_template.inp):
 | `eps` | double | convergence threshold $\varepsilon$ |
 | `cond_solid` | double | solid conductivity [W m⁻¹ K⁻¹] |
 | `cond_fluid` | double | fluid conductivity [W m⁻¹ K⁻¹] |
-| `dom_interest` | 6× int | sub-volume $x_\min,x_\max,y_\min,y_\max,z_\min,z_\max$; all 0 = disabled |
+| `dom_interest` | 6× int | sub-volume ; all 0 = disabled |
 | `write_output` | 2× int | flags: [write $T$ field, write domain decomposition] |
 
 ---
@@ -105,15 +92,13 @@ Create an input file based on [`input_template.inp`](input_template.inp):
 | 3 | slip (Neumann) walls | slip walls |
 | **4** | **Dirichlet** $T$ **gradient** | **Neumann (zero flux)** |
 
-Method **4** is the standard choice for heat conduction benchmarks:
-$T_\text{hot} = N_z + 2$ at $z=0$, $T_\text{cold} = 2$ at $z=L$.
+Method **4** is the standard choice for heat conduction benchmarks: $T_\text{hot} = N_z + 2$ at $z=0$, $T_\text{cold} = 2$ at $z=L$.  
 
 ---
 
 ## Input Data Format
 
-Geometry files are flat binary arrays of `uint8` values (one byte per voxel)
-in Fortran (column-major) order, dimensions $N_x \times N_y \times N_z$:
+Geometry files are flat binary arrays of `uint8` values (one byte per voxel) in Fortran (column-major) order, dimensions $N_x \times N_y \times N_z$: 
 
 | Byte value | Meaning |
 |:---:|---|
@@ -128,14 +113,11 @@ Expected file size: $N_x \cdot N_y \cdot N_z$ bytes.
 
 ### Temperature field
 
-Written when `write_output[0] = 1` to `temp_<geomfile>`.
-Format: flat binary array of `double` (8 bytes/voxel), same Fortran order as geometry.
-File size: $8 N_x N_y N_z$ bytes.
+Written when `write_output[0] = 1` to `temp_<geomfile>`. Format: flat binary array of `double` (8 bytes/voxel), same Fortran order as geometry. File size: $8 N_x N_y N_z$ bytes. 
 
 ### Domain decomposition
 
-Written when `write_output[1] = 1` to `domain_decomp_<geomfile>`.
-Format: flat binary array of `int` (4 bytes/voxel), each entry is the owning MPI rank.
+Written when `write_output[1] = 1` to `domain_decomp_<geomfile>`. Format: flat binary array of `int` (4 bytes/voxel), each entry is the owning MPI rank.
 
 ### Log file
 
@@ -151,13 +133,7 @@ Appended CSV, one line per write event:
 
 ## Parallelisation
 
-The global domain is partitioned into a Cartesian grid of MPI ranks.
-Each rank owns a contiguous sub-domain with a 2-voxel halo on every side.
-
-**Recommended workload**: 50³–100³ voxels per rank for efficient scaling.
-
-Use `dom_decomposition 0 0 0` to let MPI choose the decomposition automatically
-via `MPI_Dims_create`.
+The global domain is partitioned into a Cartesian grid of MPI ranks. Each rank owns a contiguous sub-domain with a 2-voxel halo on every side. **Recommended workload**: 50³–100³ voxels per rank for efficient scaling. Use `dom_decomposition 0 0 0` to let MPI choose the decomposition automatically via `MPI_Dims_create`.
 
 ---
 
@@ -187,9 +163,7 @@ pytest tests/ -v --run-integration
 
 ## Relationship to POREMAPS Stokes Solver
 
-HEATMAPS is deliberately structured as a scalar analogue of the
-[POREMAPS](https://github.com/davidkrach/poremaps) Stokes solver.
-The modules `geometry`, `parallelization`, and `output` are identical copies.
+HEATMAPS is deliberately structured as a scalar analogue of the [POREMAPS](https://github.com/davidkrach/poremaps) Stokes solver. The modules `geometry`, `parallelization`, and `output` are identical copies.
 
 | Concept | Stokes solver | Heat solver |
 |---|---|---|
