@@ -39,3 +39,12 @@
 
 # debug information files
 *.dwo
+
+# Binary
+HEATMAPS
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

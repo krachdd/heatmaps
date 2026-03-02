@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPI
+        run: sudo apt-get install -y --no-install-recommends mpich
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build binary
+        run: make -C src
+
+      - name: Run unit tests
+        run: pytest tests/ -v
+
+      - name: Run integration tests
+        run: pytest tests/ -v --run-integration

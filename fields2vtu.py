@@ -1,0 +1,99 @@
+#!/usr/bin/python3
+
+# Copyright 2026 David Krach
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the
+# Software, and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+# author: dk, david.krach@mib.uni-stuttgart.de
+# -- Header --------------------------------- #
+import sys, os
+import numpy as np
+from pyevtk.hl import pointsToVTK as vtk
+# -------------------------------------------- #
+
+def import_rawfile(filename, size, dtype, order='F'):
+    """
+    filename : str
+        name of the input file
+    size : list [3]
+        xsize, ysize, zsize (all three are int)
+    dtype : data type of the input
+        np.uint8  for input geometry
+        np.int32  for domain decomposition
+        np.float64 for temperature
+    """
+    count = size[0] * size[1] * size[2]
+    rawfile = open(filename, 'rb')
+    array = np.fromfile(rawfile, dtype=dtype, count=count)
+    array = np.reshape(array, (size[0], size[1], size[2]), order=order)
+    rawfile.close()
+    return array
+
+
+# Sanity check
+if len(sys.argv) != 6:
+    raise ValueError('Usage: python3 fields2vtu.py $FILENAME XSIZE YSIZE ZSIZE VOXELSIZE')
+else:
+    fname = str(sys.argv[1])        # filename : str
+    xs    = int(sys.argv[2])        # xsize : int
+    ys    = int(sys.argv[3])        # ysize : int
+    zs    = int(sys.argv[4])        # zsize : int
+    vs    = float(sys.argv[5])      # voxelsize : float (in meter)
+
+x, y, z = np.mgrid[0:xs, 0:ys, 0:zs] * vs
+
+# Shift positions by half voxelsize (to center of voxel)
+x += 0.5*vs - 0.5*xs*vs
+y += 0.5*vs - 0.5*ys*vs
+z += 0.5*vs - 0.5*zs*vs
+
+# Empty dict to save available data
+data = {}
+
+# read geometry
+fname_res = fname
+print(f'Input file: {fname_res}')
+if os.path.isfile(fname_res):
+    domain = import_rawfile(fname_res, [xs, ys, zs], dtype=np.uint8)
+    data['porespace'] = domain
+else:
+    raise ValueError('Geometry file not found.')
+
+# read domain decomposition
+fname_res = f'domain_decomp_{fname}'
+if os.path.isfile(fname_res):
+    decomp = import_rawfile(fname_res, [xs, ys, zs], dtype=np.int32)
+    data['decomposition'] = decomp
+    print(f'{fname_res} found.')
+else:
+    print(f'No domain_decomp file found.')
+
+# read temperature
+fname_res = f'temp_{fname}'
+if os.path.isfile(fname_res):
+    temp = import_rawfile(fname_res, [xs, ys, zs], dtype=np.float64)
+    data['temperature [-]'] = temp
+    print(f'{fname_res} found.')
+else:
+    print(f'No temp file found.')
+
+# export results to one combined VTK file
+filename_res = f'fields_{fname}'
+vtk(filename_res.replace('.raw', ''), x, y, z, data=data)
