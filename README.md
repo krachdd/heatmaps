@@ -167,7 +167,7 @@ HEATMAPS is deliberately structured as a scalar analogue of the [POREMAPS](https
 
 | Concept | Stokes solver | Heat solver |
 |---|---|---|
-| Governing equation | $\nabla\!\cdot\!\mathbf{v}=0,\;\nabla p=\mu\Delta\mathbf{v}$ | $\nabla\!\cdot\!(\lambda\nabla T)=0$ |
+| Governing equation | $\nabla \cdot \mathbf{v}=0,\;\nabla p=\mu\Delta\mathbf{v}$ | $\nabla \cdot (\lambda\nabla T)=0$ |
 | Primary field | $p,\,v_x,\,v_y,\,v_z$ | $T$ |
 | Driving condition | pressure gradient $\Delta p$ | temperature difference $\Delta T$ |
 | Pseudo-time param. | $c^2$ (artif. compressibility) | $\Delta t_\text{heat}$ |
