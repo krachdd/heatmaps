@@ -86,15 +86,17 @@ void allocate_initial_field(int* size,
         }
     }
 
-    // Initialise temperature with a linear gradient along z:
-    // T[i][j][k] = (N_z - i_global) + 2, matching the Dirichlet BCs
-    // T_hot = N_z + 2 at z=0 and T_cold = 2 at z=L.
-    // Applied to all voxels (fluid and solid).
+    // Initialise temperature with the linear profile between the Dirichlet
+    // values on the z boundary faces, evaluated at the cell centres
+    // z_c = global index + 0.5. Applied to all voxels (fluid and solid).
     int lim = 2;
+    double T_hot  = t_hot(size);
+    double T_cold = t_cold(size);
     for (i = lim; i < new_proc_size[2] - lim; i++){
+        double zc = (double)(starts[2] + i - lim) + 0.5;
         for (j = lim; j < new_proc_size[1] - lim; j++){
             for (k = lim; k < new_proc_size[0] - lim; k++){
-                temp[i][j][k] = (size[2] - starts[2] - i) + lim + 2;
+                temp[i][j][k] = T_hot - (T_hot - T_cold) * zc / (double)size[2];
             }
         }
     }
@@ -122,8 +124,13 @@ void determine_comm_pattern(int* dims,
  *
  *   3:  non-periodic; slip walls in x and y; temperature-driven in z
  *
- *   4:  non-periodic; no-slip walls in x and y; temperature-driven in z
+ *   4:  non-periodic; adiabatic walls in x and y; Dirichlet T in z
  *       (default for heat conduction benchmark)
+ *
+ *   5:  periodic in x and y; Dirichlet T in z
+ *
+ * Only 4 and 5 are accepted by the heat solver (see main_heat_solver.cc);
+ * 0-3 are kept for compatibility of the communication pattern only.
  */
 
     int i;
@@ -201,9 +208,18 @@ void determine_comm_pattern(int* dims,
             if (cart_coords[1] + 1 == dims[1]) { bc[1] = 4; }
         }
 
-        // z direction: Dirichlet BCs are applied by reapply_temp_gradient,
+        // z direction: Dirichlet BCs are applied by apply_temp_bcs,
         // not by halo communication. Use slip-like values here so that
         // communicate_halos does not overwrite the Dirichlet ghost layers.
+        if (dims[2] == 1){ bc[2] = 5; }
+        else if (dims[2] > 1){
+            if (cart_coords[2] == 0)           { bc[2] = 2; }
+            if (cart_coords[2] + 1 == dims[2]) { bc[2] = 4; }
+        }
+    }
+
+    else if (bc_method == 5){
+        // Periodic x and y (bc stays 0 = always communicate); Dirichlet T in z.
         if (dims[2] == 1){ bc[2] = 5; }
         else if (dims[2] > 1){
             if (cart_coords[2] == 0)           { bc[2] = 2; }

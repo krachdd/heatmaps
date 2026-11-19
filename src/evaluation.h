@@ -35,22 +35,15 @@ OTHER DEALINGS IN THE SOFTWARE.
 ***********************************************************************/
 
 
-void compute_eff_conductivity(  bool*** proc_geom,
-                                int* size,
-                                int* new_proc_size,
-                                double*** temp,
-                                double* lambda_eff,
-                                double cond_solid,
-                                double cond_fluid,
-                                MPI_Comm comm_cart,
-                                double voxelsize);
-
-
-double compute_convergence( bool*** proc_geom,
+// Total z flux through every face plane -> lambda_eff (output argument) and
+// the plane-flux imbalance max|Q_f - Q_mean|/|Q_mean| (return value).
+double evaluate_heat_flux(  bool*** proc_geom,
                             int* size,
                             int* new_proc_size,
                             double*** temp,
-                            double* flux_prev,
                             double cond_solid,
                             double cond_fluid,
-                            MPI_Comm comm_cart);
+                            int* neighbors,
+                            int* starts,
+                            MPI_Comm comm_cart,
+                            double* lambda_eff);

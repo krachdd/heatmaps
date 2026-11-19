@@ -201,7 +201,7 @@ void write_logfile( int iteration,
     if (firstline == true){
         fprintf(log_file, "# iteration, conv, TPS [1/s], lambda_eff [W/(m*K)]\n");
     }
-    fprintf(log_file, "%i, %e, %e, %e\n",
+    fprintf(log_file, "%i, %e, %e, %.10e\n",
                 iteration,
                 conv,
                 tps,

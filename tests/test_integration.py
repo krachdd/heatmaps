@@ -50,16 +50,22 @@ def _require_mpirun():
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _write_geom(path, nx, ny, nz):
-    """All-fluid uint8 geometry in C-order (column-major matches MPI reader)."""
-    np.zeros(nx * ny * nz, dtype=np.uint8).tofile(path)
+def _write_geom(path, nx, ny, nz, geom=None):
+    """
+    uint8 geometry, array index order [z, y, x] (x fastest = Fortran order of
+    (N_x, N_y, N_z) as read by the solver). Default: all fluid.
+    """
+    if geom is None:
+        geom = np.zeros((nz, ny, nx), dtype=np.uint8)
+    assert geom.shape == (nz, ny, nx)
+    geom.astype(np.uint8).tofile(path)
 
 
 def _write_inp(path, geom_path, log_path, nx, ny, nz, *,
                bc_method=4, voxelsize=1e-5, max_iter=1300,
                it_eval=100, it_write=100, eps=1e-10,
                cond_solid=1.0, cond_fluid=0.1,
-               write_output="0 0"):
+               solver=2, write_output="0 0"):
     # Use only the basename so that output.cc can build "temp_<basename>"
     # in the current working directory (tmpdir).
     geom_basename = os.path.basename(geom_path)
@@ -74,7 +80,7 @@ def _write_inp(path, geom_path, log_path, nx, ny, nz, *,
         f"it_eval {it_eval}",
         f"it_write {it_write}",
         f"log_file_name {log_basename}",
-        "solving_algorithm 2",
+        f"solving_algorithm {solver}",
         f"eps {eps}",
         f"cond_solid {cond_solid}",
         f"cond_fluid {cond_fluid}",
@@ -86,12 +92,14 @@ def _write_inp(path, geom_path, log_path, nx, ny, nz, *,
         fh.write(content)
 
 
-def _run(tmpdir, nx=10, ny=10, nz=10, nranks=1, **inp_kwargs):
+def _run(tmpdir, nx=10, ny=10, nz=10, nranks=1, geom=None, write_geom=True,
+         **inp_kwargs):
     """Write geometry + input file, execute binary, return (result, log_path)."""
     geom_path = os.path.join(tmpdir, "geom.raw")
     log_path  = os.path.join(tmpdir, "heat.log")
     inp_path  = os.path.join(tmpdir, "input.inp")
-    _write_geom(geom_path, nx, ny, nz)
+    if write_geom:
+        _write_geom(geom_path, nx, ny, nz, geom)
     _write_inp(inp_path, geom_path, log_path, nx, ny, nz, **inp_kwargs)
     result = subprocess.run(
         ["mpirun", "--oversubscribe", "-np", str(nranks), BINARY,
@@ -107,6 +115,15 @@ def _read_data_lines(log_path):
     """Return non-comment lines from the logfile."""
     with open(log_path) as fh:
         return [l for l in fh if not l.startswith("#") and l.strip()]
+
+
+def _final_lambda(log_path):
+    return float(_read_data_lines(log_path)[-1].split(",")[-1].strip())
+
+
+# converged settings for the exact-value tests
+EXACT = dict(solver=3, max_iter=30000, it_eval=10, it_write=10, eps=1e-13)
+LS, LF = 1.0, 0.1   # cond_solid, cond_fluid
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -157,22 +174,11 @@ class TestIntegration:
         lambda_eff = float(data[-1].split(",")[-1].strip())
         assert lambda_eff > 0.0, f"λ_eff = {lambda_eff} is not positive."
 
-    def test_lambda_eff_all_fluid_proportional_to_cond_fluid(self, tmp_path):
-        """
-        For an all-fluid domain λ_eff must be proportional to cond_fluid.
-        The boundary condition fixes the last interior voxel at T=3, giving an
-        effective driving ΔT = (N_z−1) instead of N_z, so the steady-state
-        value is cond_fluid*(N_z−1)/N_z = 0.9*cond_fluid for N_z=10.
-        During the transient (1300 iterations) the value lies in [0.85, 1.0]*cond_fluid.
-        """
+    def test_lambda_eff_all_fluid_exact(self, tmp_path):
+        """Homogeneous fluid: λ_eff = cond_fluid exactly."""
         cond_f = 0.5
         _, log_path = _run(str(tmp_path), cond_solid=1.0, cond_fluid=cond_f)
-        data = _read_data_lines(log_path)
-        lambda_eff = float(data[-1].split(",")[-1].strip())
-        # Loose bounds: between 80% and 105% of cond_fluid
-        assert 0.80 * cond_f <= lambda_eff <= 1.05 * cond_f, (
-            f"λ_eff={lambda_eff:.4f} not in expected range [{0.80*cond_f:.3f}, {1.05*cond_f:.3f}]"
-        )
+        assert _final_lambda(log_path) == pytest.approx(cond_f, rel=1e-9)
 
     def test_lambda_eff_scales_with_conductivity(self, tmp_path):
         """
@@ -213,3 +219,119 @@ class TestIntegration:
         expected_bytes = 10 * 10 * 10 * 8
         actual_bytes = os.path.getsize(os.path.join(str(tmp_path), temp_files[0]))
         assert actual_bytes == expected_bytes
+
+
+# ── Exact solutions ────────────────────────────────────────────────────────────
+
+def _layers_z(n, phases):
+    """Layers stacked along z (heat flows across them: series)."""
+    phases = np.asarray(phases, dtype=np.uint8)
+    return np.broadcast_to(phases[:, None, None], (n, n, n)).copy()
+
+
+def _layers_x(n, phases):
+    """Layers stacked along x (heat flows along them: parallel)."""
+    phases = np.asarray(phases, dtype=np.uint8)
+    return np.broadcast_to(phases[None, None, :], (n, n, n)).copy()
+
+
+def _series(phases):
+    lam = np.where(np.asarray(phases) == 1, LS, LF)
+    return len(lam) / np.sum(1.0 / lam)
+
+
+def _parallel(phases):
+    lam = np.where(np.asarray(phases) == 1, LS, LF)
+    return float(np.mean(lam))
+
+
+N = 12
+RANDOM_PHASES = np.random.default_rng(1).integers(0, 2, N)
+
+
+class TestExactSolutions:
+    """
+    Layered media have closed-form λ_eff (Wiener bounds), which the
+    discretisation (harmonic-mean faces, Dirichlet on the boundary faces,
+    adiabatic or periodic side walls) reproduces exactly.
+    """
+
+    @pytest.mark.parametrize("nranks", [1, 4])
+    @pytest.mark.parametrize("bc_method", [4, 5])
+    def test_series_random_layers(self, tmp_path, nranks, bc_method):
+        geom = _layers_z(N, RANDOM_PHASES)
+        _, log = _run(str(tmp_path), N, N, N, nranks=nranks, geom=geom,
+                      bc_method=bc_method, cond_solid=LS, cond_fluid=LF, **EXACT)
+        assert _final_lambda(log) == pytest.approx(_series(RANDOM_PHASES), rel=1e-8)
+
+    @pytest.mark.parametrize("nranks", [1, 4])
+    @pytest.mark.parametrize("bc_method", [4, 5])
+    def test_parallel_random_layers(self, tmp_path, nranks, bc_method):
+        geom = _layers_x(N, RANDOM_PHASES)
+        _, log = _run(str(tmp_path), N, N, N, nranks=nranks, geom=geom,
+                      bc_method=bc_method, cond_solid=LS, cond_fluid=LF, **EXACT)
+        assert _final_lambda(log) == pytest.approx(_parallel(RANDOM_PHASES), rel=1e-8)
+
+    def test_all_solid_exact(self, tmp_path):
+        """No artificial resistance at the inlet/outlet faces."""
+        geom = np.ones((N, N, N), dtype=np.uint8)
+        _, log = _run(str(tmp_path), N, N, N, geom=geom,
+                      cond_solid=LS, cond_fluid=LF, **EXACT)
+        assert _final_lambda(log) == pytest.approx(LS, rel=1e-9)
+
+    def test_rank_independent_random_medium(self, tmp_path):
+        """A random 3D medium gives the same λ_eff on 1 and 4 ranks."""
+        geom = (np.random.default_rng(2).random((N, N, N)) < 0.4).astype(np.uint8)
+        res = []
+        for nr in (1, 4):
+            d = tmp_path / f"np{nr}"; d.mkdir()
+            _, log = _run(str(d), N, N, N, nranks=nr, geom=geom,
+                          cond_solid=LS, cond_fluid=LF, **EXACT)
+            res.append(_final_lambda(log))
+        assert res[1] == pytest.approx(res[0], rel=1e-8)
+        # and within the Wiener bounds
+        phi_s = geom.mean()
+        assert 1.0 / (phi_s / LS + (1 - phi_s) / LF) <= res[0] <= phi_s * LS + (1 - phi_s) * LF
+
+
+class TestInputErrors:
+
+    def test_missing_geometry_aborts(self, tmp_path):
+        result, _ = _run(str(tmp_path), write_geom=False)
+        assert result.returncode != 0
+        assert b"Cannot open geometry file" in result.stderr + result.stdout
+
+    def test_wrong_geometry_size_aborts(self, tmp_path):
+        result, _ = _run(str(tmp_path), nx=10, ny=10, nz=10)
+        assert result.returncode == 0   # sanity: correct size runs
+        (tmp_path / "geom.raw").write_bytes(b"\x00" * 999)
+        res = subprocess.run(["mpirun", "--oversubscribe", "-np", "1", BINARY, "input.inp"],
+                             capture_output=True, cwd=str(tmp_path), timeout=60)
+        assert res.returncode != 0
+        assert b"expected 1000" in res.stderr + res.stdout
+
+    @pytest.mark.parametrize("bc_method", [0, 1, 2, 3])
+    def test_unsupported_boundary_method_aborts(self, tmp_path, bc_method):
+        result, _ = _run(str(tmp_path), bc_method=bc_method)
+        assert result.returncode != 0
+        assert b"not supported" in result.stderr + result.stdout
+
+
+class TestOddPeriodicExtent:
+    """Red-black ordering is only consistent for even periodic extents."""
+
+    def test_sor_with_odd_periodic_extent_aborts(self, tmp_path):
+        result, _ = _run(str(tmp_path), nx=11, ny=12, nz=12, bc_method=5, solver=3)
+        assert result.returncode != 0
+        assert b"require even N_x and N_y" in result.stderr + result.stdout
+
+    @pytest.mark.parametrize("nranks", [1, 2])
+    def test_gauss_seidel_with_odd_periodic_extent_exact(self, tmp_path, nranks):
+        """Gauss-Seidel stays stable and exact on an odd periodic extent."""
+        n = 11
+        phases = RANDOM_PHASES[:n]
+        geom = np.broadcast_to(np.asarray(phases, np.uint8)[None, None, :], (12, 12, n)).copy()
+        _, log = _run(str(tmp_path), n, 12, 12, nranks=nranks, geom=geom, bc_method=5,
+                      cond_solid=LS, cond_fluid=LF, solver=2, max_iter=60000,
+                      it_eval=10, it_write=10, eps=1e-13)
+        assert _final_lambda(log) == pytest.approx(_parallel(phases), rel=1e-8)

@@ -6,7 +6,7 @@ import pytest
 
 from helpers import (
     harmonic_mean, heat_update, make_proc_geom, make_linear_temp,
-    DT_HEAT, OMEGA_SOR, HALO,
+    OMEGA_SOR, HALO,
 )
 
 
@@ -143,10 +143,11 @@ class TestHeatUpdate:
 
         temp_new = heat_update(geom, temp.copy(), cond_s, cond_f, solver=2)
 
-        # Expected: only lam_zm contributes (all other neighbours are at 5.0)
-        lam_zm = harmonic_mean(cond_s, cond_f)
-        delta  = lam_zm * (temp[GI - 1, GJ, GK] - temp[GI, GJ, GK])
-        expected = temp[GI, GJ, GK] + DT_HEAT * delta
+        # Expected: only lam_zm contributes (all other neighbours are at 5.0);
+        # all six faces are solid-fluid, so the local step is 1 / (6 λ_face).
+        lam_face = harmonic_mean(cond_s, cond_f)
+        delta  = lam_face * (temp[GI - 1, GJ, GK] - temp[GI, GJ, GK])
+        expected = temp[GI, GJ, GK] + delta / (6.0 * lam_face)
         assert temp_new[GI, GJ, GK] == pytest.approx(expected)
 
     def test_update_exact_formula_all_fluid(self):
@@ -167,8 +168,76 @@ class TestHeatUpdate:
 
         temp_new = heat_update(geom, temp.copy(), cond_solid=1.0, cond_fluid=0.5)
 
-        lam = 0.5   # uniform fluid: all face conductivities equal cond_fluid
-        delta = lam * ((1.0 - 0.0) + (2.0 - 0.0) + (3.0 - 0.0)
-                     + (4.0 - 0.0) + (5.0 - 0.0) + (6.0 - 0.0))
-        expected = 0.0 + DT_HEAT * delta
+        # uniform medium: Gauss-Seidel step sets T to the neighbour mean
+        expected = (1.0 + 2.0 + 3.0 + 4.0 + 5.0 + 6.0) / 6.0
         assert temp_new[ci, cj, ck] == pytest.approx(expected)
+
+
+# ── Physical boundary faces ────────────────────────────────────────────────────
+
+class TestBoundaryFaces:
+    """Boundary faces are treated inside the stencil (solver.cc)."""
+
+    @staticmethod
+    def _setup(n=4):
+        geom = make_proc_geom(np.zeros((n, n, n), dtype=np.uint8), halo_value=0)
+        temp = np.full(geom.shape, 5.0)
+        return geom, temp
+
+    def test_adiabatic_wall_ignores_ghost(self):
+        """A garbage ghost value behind an adiabatic x wall has no effect."""
+        geom, temp = self._setup()
+        h = HALO
+        walls = (True, True, True, True, False, False)
+        ref = heat_update(geom, temp.copy(), 1.0, 1.0, boundaries=walls)
+        temp[:, :, h - 1] = -1e6           # ghost layer behind x- wall
+        out = heat_update(geom, temp.copy(), 1.0, 1.0, boundaries=walls)
+        s = slice(h, -h)
+        np.testing.assert_array_equal(out[s, s, s], ref[s, s, s])
+
+    def test_without_wall_flag_ghost_leaks(self):
+        """Without the wall flag the same ghost value changes the solution."""
+        geom, temp = self._setup()
+        h = HALO
+        ref = heat_update(geom, temp.copy(), 1.0, 1.0)
+        temp[:, :, h - 1] = -1e6
+        out = heat_update(geom, temp.copy(), 1.0, 1.0)
+        s = slice(h, -h)
+        assert not np.array_equal(out[s, s, s], ref[s, s, s])
+
+    def test_dirichlet_face_half_cell(self):
+        """
+        Cell next to the hot face, all other neighbours at T: the Dirichlet face
+        has conductance 2λ and value T_hot.
+        """
+        geom, temp = self._setup()
+        h = HALO
+        t_hot = 9.0
+        out = heat_update(geom, temp.copy(), 1.0, 1.0, solver=2,
+                          boundaries=(False,) * 4 + (True, False),
+                          t_hot=t_hot, t_cold=0.0)
+        # interior neighbours all 5.0, face: 2λ (9 - 5); Σλ = 5 + 2 = 7
+        assert out[h, h + 1, h + 1] == pytest.approx(5.0 + 2.0 * (t_hot - 5.0) / 7.0)
+
+    def test_zero_conductivity_is_finite(self):
+        """λ_solid = 0 (formation-factor setup) must not produce NaN."""
+        geom = make_proc_geom(np.ones((4, 4, 4), dtype=np.uint8), halo_value=1)
+        temp = np.full(geom.shape, 5.0)
+        out = heat_update(geom, temp, cond_solid=0.0, cond_fluid=1.0)
+        assert np.all(np.isfinite(out))
+
+
+class TestRedBlack:
+
+    def test_two_colours_cover_all_voxels_once(self):
+        """Red + black sweeps together touch every interior voxel exactly once."""
+        geom = make_proc_geom(np.zeros((5, 5, 5), dtype=np.uint8), halo_value=0)
+        temp = np.zeros(geom.shape)
+        temp[HALO - 1] = 1.0  # source in the z- ghost layer
+        red = heat_update(geom, temp, 1.0, 1.0, colour=0)
+        changed_red = red != temp
+        black = heat_update(geom, temp, 1.0, 1.0, colour=1)
+        changed_black = black != temp
+        assert not np.any(changed_red & changed_black)
+        allc = heat_update(geom, temp, 1.0, 1.0)
+        np.testing.assert_array_equal(changed_red | changed_black, allc != temp)

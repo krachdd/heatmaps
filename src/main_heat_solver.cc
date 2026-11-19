@@ -53,6 +53,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include "calc_heat.h"
 #include "parallelization.h"
 #include "initialize.h"
+#include "boundary_conditions.h"
 //**********************************************************************
 
 int main (int argc, char** argv){
@@ -140,9 +141,19 @@ int main (int argc, char** argv){
 
     // Read parallel params first (needed to set up Cartesian topology)
     read_parallel_params(input_filename, &bc_method, dims, rank_glob);
-    if (bc_method == 0){                  periods[0] = 1; periods[1] = 1; periods[2] = 1;}
-    if (bc_method == 1 || bc_method == 2){periods[0] = 0; periods[1] = 0; periods[2] = 1;}
-    if (bc_method == 3 || bc_method == 4){periods[0] = 0; periods[1] = 0; periods[2] = 0;}
+    // Heat conduction is driven by Dirichlet temperatures on the z faces,
+    // so z is never periodic. Supported side-wall (x/y) conditions:
+    //   4: adiabatic (zero-flux) walls
+    //   5: periodic
+    if (bc_method == 4){periods[0] = 0; periods[1] = 0; periods[2] = 0;}
+    else if (bc_method == 5){periods[0] = 1; periods[1] = 1; periods[2] = 0;}
+    else {
+        if (rank_glob == 0){
+            fprintf(stderr, "boundary_method %i is not supported. Use 4 (adiabatic x/y walls) "
+                            "or 5 (periodic x/y), both with Dirichlet T in z.\n", bc_method);
+        }
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     if (dims[0] == 0 && dims[1] == 0 && dims[2] == 0){
         for (i = 0; i < ndims; i++){dims[i] = 0;}
@@ -186,6 +197,18 @@ int main (int argc, char** argv){
                             write_output,
                             rank);
 
+    // Red-black SOR needs an even number of cells in every periodic direction:
+    // with an odd period, cells on opposite faces get the same colour although
+    // they are neighbours, and SOR diverges. Gauss-Seidel (solver 1/2) stays stable.
+    if (bc_method == 5 && solver == 3 && (size[0] % 2 != 0 || size[1] % 2 != 0)){
+        if (rank == 0){
+            fprintf(stderr, "Periodic side walls (boundary_method 5) with SOR (solving_algorithm 3) "
+                            "require even N_x and N_y (given %i x %i). Crop the image by one voxel "
+                            "or use solving_algorithm 2.\n", size[0], size[1]);
+        }
+        MPI_Abort(comm_cart, 1);
+    }
+
     // Compute domain limits
     get_dom_limits(size, proc_size, new_proc_size, starts, ends, dims, rank, cart_coords);
     // Determine communication pattern based on BC method
@@ -225,6 +248,9 @@ int main (int argc, char** argv){
                     n_proc,
                     cart_coords,
                     neighbors);
+
+    // Ghost cells on physical boundaries carry the material of the adjacent cell
+    mirror_geom_at_boundaries(proc_geometry, new_proc_size, neighbors);
 
     MPI_Barrier(comm_cart);
 

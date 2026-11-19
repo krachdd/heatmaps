@@ -35,9 +35,16 @@ OTHER DEALINGS IN THE SOFTWARE.
  *
  * file_name_char  : max bytes for a filename string
  * pass            : no-op placeholder macro
- * omega_sor       : relaxation factor for SOR (1.0 = Gauss-Seidel)
+ * omega_sor       : over-relaxation factor for solver 3 (SOR), 1 < omega < 2;
+ *                   solvers 1/2 use omega = 1 (Gauss-Seidel)
  * ndims           : number of spatial dimensions of the Cartesian grid
- * dt_heat         : pseudo-time step size; reduce to improve stability
+ * t_hot / t_cold  : Dirichlet temperatures at z = 0 / z = L
+ *                   (T_hot - T_cold = N_z, i.e. unit gradient in voxel units)
+ *
+ *             krach 2026: removed dt_heat. The update now uses the local
+ *                         step 1/sum(lambda_face) (exact Gauss-Seidel), which
+ *                         is stable for any conductivities. The old fixed
+ *                         dt_heat = 1e-4 was ~1000x below the stability limit.
  ***********************************************************************/
 
 #ifndef file_name_char
@@ -47,11 +54,13 @@ OTHER DEALINGS IN THE SOFTWARE.
     #define pass (void)0
 #endif
 #ifndef omega_sor
-    #define omega_sor 1.2
+    #define omega_sor 1.9
 #endif
 #ifndef ndims
     #define ndims 3
 #endif
-#ifndef dt_heat
-    #define dt_heat 1.0e-4
-#endif
+
+// Harmonic mean of two face conductivities; 0 if either side is 0.
+static inline double harm_mean(double a, double b){ return (a + b > 0.0) ? 2.0 * a * b / (a + b) : 0.0; }
+static inline double t_hot(const int* size){ return (double)size[2] + 2.0; }
+static inline double t_cold(const int* size){ (void)size; return 2.0; }

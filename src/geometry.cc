@@ -82,7 +82,20 @@ void read_geometry( const char* GEOM_FILE,
     MPI_Type_create_subarray(3, size, proc_size, starts, order, etype, &filetype);
     MPI_Type_commit(&filetype);
     // Do not open file with MPI_MODE_SEQUENTIAL
-    MPI_File_open(comm_cart, GEOM_FILE, MPI_MODE_RDONLY, MPI_INFO_NULL, &geom_fh);
+    int open_err = MPI_File_open(comm_cart, GEOM_FILE, MPI_MODE_RDONLY, MPI_INFO_NULL, &geom_fh);
+    if (open_err != MPI_SUCCESS){
+        if (rank == 0){ fprintf(stderr, "Cannot open geometry file '%s'.\n", GEOM_FILE); }
+        MPI_Abort(comm_cart, 1);
+    }
+    MPI_Offset file_size = 0;
+    MPI_File_get_size(geom_fh, &file_size);
+    if ((long long)file_size != (long long)size[0] * size[1] * size[2]){
+        if (rank == 0){
+            fprintf(stderr, "Geometry file '%s' has %lld bytes, expected %lld (size_x_y_z).\n",
+                    GEOM_FILE, (long long)file_size, (long long)size[0] * size[1] * size[2]);
+        }
+        MPI_Abort(comm_cart, 1);
+    }
     read_offset = 0;
     MPI_File_set_view(geom_fh, read_offset, etype, filetype, "native", MPI_INFO_NULL);
 

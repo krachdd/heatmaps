@@ -27,17 +27,38 @@ OTHER DEALINGS IN THE SOFTWARE.
  * Date:       2024
  * Contact:    david.krach@mib.uni-stuttgart.de
  *
- * Purpose:    void reapply_temp_gradient:
- *             Re-set temperature Dirichlet BCs at z-faces after every
- *             halo-exchange step.
- *             \f$ T_\mathrm{hot} = N_z + 2 \f$ at \f$ z = 0 \f$ (inlet ghost layer).
- *             \f$ T_\mathrm{cold} = 2 \f$ at \f$ z = L \f$ (outlet ghost layer).
- *             Applied to all voxels (fluid and solid), since heat
- *             conducts through both phases.
+ * Purpose:    Boundary conditions of the heat conduction problem.
  *
- * Contents:
+ *             All BCs are imposed through the two ghost layers of every
+ *             sub-domain face that lies on the physical boundary, i.e.
+ *             where the Cartesian neighbour is MPI_PROC_NULL. Faces with
+ *             a neighbouring rank (or a periodic partner) are filled by
+ *             the halo exchange instead.
+ *
+ *             z faces (inflow/outflow): Dirichlet temperature located on
+ *             the outer voxel FACE (half a voxel from the first cell centre).
+ *             The ghost cell carries the material of the adjacent cell
+ *             (mirror_geom_at_boundaries) and the temperature
+ *                 T_ghost = 2 T_bc - T_cell,
+ *             so that the face flux is lambda_cell * (T_cell - T_bc) / (dz/2).
+ *             With harmonic-mean face conductivities in the interior this
+ *             reproduces the series/parallel layer solutions exactly.
+ *
+ *             x/y faces (only if not periodic): adiabatic (zero flux),
+ *             T_ghost = T_cell (mirror).
+ *
+ *             T_hot  = N_z + 2 at z = 0,  T_cold = 2 at z = L
+ *             (Delta T = N_z = L in voxel units).
+ *
+ * Contents:   mirror_geom_at_boundaries, apply_temp_bcs
  *
  * Changelog:  Version: 1.0.0
+ *             krach 2026: Dirichlet values on the boundary face instead of
+ *                         ghost-cell centre; ghost material copied from the
+ *                         adjacent cell (removes artificial resistive layer);
+ *                         no interior layer pinned any more; adiabatic x/y
+ *                         walls implemented (previously the uninitialised
+ *                         ghost cells acted as T = 0 heat sinks).
  ***********************************************************************/
 
 // HEADER ***************************************************************
@@ -46,37 +67,108 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include <math.h>
 #include "mpi.h"
 #include "constants.h"
+#include "boundary_conditions.h"
 // **********************************************************************
 
-void reapply_temp_gradient( int* size,
-                            int* new_proc_size,
-                            double*** temp,
-                            int* cart_coords,
-                            int* dims)
-{
-    int j, k;
-    int zmax_procs = dims[2] - 1;  // index of last rank in z direction
-    int lim = 2;
 
-    if (cart_coords[2] == 0){
-        // Set hot-side Dirichlet BC at the inlet ghost layer (i=1).
-        // T_hot = size[2] + 2 (mirrors pressure initialisation).
-        double T_hot = (double)(size[2] + 2);
-        for (j = lim; j < new_proc_size[1] - lim; j++){
-            for (k = lim; k < new_proc_size[0] - lim; k++){
-                temp[1][j][k] = T_hot;
+void mirror_geom_at_boundaries( bool*** proc_geom,
+                                int* new_proc_size,
+                                int* neighbors)
+{
+    int a, b;
+    int nx = new_proc_size[0];
+    int ny = new_proc_size[1];
+    int nz = new_proc_size[2];
+
+    // z faces first, then y, then x: later directions overwrite the
+    // edge/corner ghosts, which are not used by the 7-point stencil anyway.
+    for (a = 0; a < ny; a++){
+        for (b = 0; b < nx; b++){
+            if (neighbors[4] == MPI_PROC_NULL){
+                proc_geom[1][a][b] = proc_geom[2][a][b];
+                proc_geom[0][a][b] = proc_geom[3][a][b];
+            }
+            if (neighbors[5] == MPI_PROC_NULL){
+                proc_geom[nz-2][a][b] = proc_geom[nz-3][a][b];
+                proc_geom[nz-1][a][b] = proc_geom[nz-4][a][b];
             }
         }
     }
+    for (a = 0; a < nz; a++){
+        for (b = 0; b < nx; b++){
+            if (neighbors[2] == MPI_PROC_NULL){
+                proc_geom[a][1][b] = proc_geom[a][2][b];
+                proc_geom[a][0][b] = proc_geom[a][3][b];
+            }
+            if (neighbors[3] == MPI_PROC_NULL){
+                proc_geom[a][ny-2][b] = proc_geom[a][ny-3][b];
+                proc_geom[a][ny-1][b] = proc_geom[a][ny-4][b];
+            }
+        }
+    }
+    for (a = 0; a < nz; a++){
+        for (b = 0; b < ny; b++){
+            if (neighbors[0] == MPI_PROC_NULL){
+                proc_geom[a][b][1] = proc_geom[a][b][2];
+                proc_geom[a][b][0] = proc_geom[a][b][3];
+            }
+            if (neighbors[1] == MPI_PROC_NULL){
+                proc_geom[a][b][nx-2] = proc_geom[a][b][nx-3];
+                proc_geom[a][b][nx-1] = proc_geom[a][b][nx-4];
+            }
+        }
+    }
+}
 
-    if (cart_coords[2] == zmax_procs){
-        // Set cold-side Dirichlet BC at the outlet ghost layer.
-        // T_cold = 2.0 at outermost ghost (i=new_proc_size[2]-2).
-        // Also fix the last interior voxel to 3.0 to maintain gradient.
-        for (j = lim; j < new_proc_size[1] - lim; j++){
-            for (k = lim; k < new_proc_size[0] - lim; k++){
-                temp[new_proc_size[2]-2][j][k] = 2.0;
-                temp[new_proc_size[2]-3][j][k] = 3.0;
+
+void apply_temp_bcs(int* size,
+                    int* new_proc_size,
+                    double*** temp,
+                    int* neighbors)
+{
+    int a, b;
+    int nx = new_proc_size[0];
+    int ny = new_proc_size[1];
+    int nz = new_proc_size[2];
+    double T_hot  = t_hot(size);
+    double T_cold = t_cold(size);
+
+    // x walls: adiabatic (mirror)
+    for (a = 0; a < nz; a++){
+        for (b = 0; b < ny; b++){
+            if (neighbors[0] == MPI_PROC_NULL){
+                temp[a][b][1] = temp[a][b][2];
+                temp[a][b][0] = temp[a][b][3];
+            }
+            if (neighbors[1] == MPI_PROC_NULL){
+                temp[a][b][nx-2] = temp[a][b][nx-3];
+                temp[a][b][nx-1] = temp[a][b][nx-4];
+            }
+        }
+    }
+    // y walls: adiabatic (mirror)
+    for (a = 0; a < nz; a++){
+        for (b = 0; b < nx; b++){
+            if (neighbors[2] == MPI_PROC_NULL){
+                temp[a][1][b] = temp[a][2][b];
+                temp[a][0][b] = temp[a][3][b];
+            }
+            if (neighbors[3] == MPI_PROC_NULL){
+                temp[a][ny-2][b] = temp[a][ny-3][b];
+                temp[a][ny-1][b] = temp[a][ny-4][b];
+            }
+        }
+    }
+    // z faces: Dirichlet on the boundary face (linear extrapolation into ghost)
+    for (a = 0; a < ny; a++){
+        for (b = 0; b < nx; b++){
+            if (neighbors[4] == MPI_PROC_NULL){
+                temp[1][a][b] = 2.0 * T_hot - temp[2][a][b];
+                temp[0][a][b] = 2.0 * T_hot - temp[3][a][b];
+            }
+            if (neighbors[5] == MPI_PROC_NULL){
+                temp[nz-2][a][b] = 2.0 * T_cold - temp[nz-3][a][b];
+                temp[nz-1][a][b] = 2.0 * T_cold - temp[nz-4][a][b];
             }
         }
     }

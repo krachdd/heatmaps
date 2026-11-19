@@ -7,8 +7,7 @@ tests to verify correctness independently of the compiled binary.
 import numpy as np
 
 # ── Constants (match src/constants.h) ─────────────────────────────────────────
-DT_HEAT   = 1.0e-4   # pseudo-time step
-OMEGA_SOR = 1.2      # SOR over-relaxation factor
+OMEGA_SOR = 1.9      # SOR over-relaxation factor (solver 3)
 HALO      = 2        # halo width in each direction
 
 
@@ -35,16 +34,28 @@ def heat_update(proc_geom: np.ndarray,
                 temp: np.ndarray,
                 cond_solid: float,
                 cond_fluid: float,
-                solver: int = 2) -> np.ndarray:
+                solver: int = 2,
+                boundaries=(False,) * 6,
+                t_hot: float = None,
+                t_cold: float = None,
+                colour: int = None) -> np.ndarray:
     """
-    One Jacobi pseudo-time step of ∇·(λ∇T) = 0.
+    One relaxation sweep of ∇·(λ∇T) = 0 with local step 1/Σλ_face:
+
+        T ← T + ω · Σ_f λ_f (T_f − T) / Σ_f λ_f      (ω = 1, or OMEGA_SOR for solver 3)
 
     Parameters
     ----------
-    proc_geom : (nz, ny, nx) uint8 array  (0=fluid, 1=solid, includes halos)
-    temp      : (nz, ny, nx) float64 array (includes halos)
-    solver    : 1 or 2 = standard step; 3 = SOR with omega_sor
-    Returns   : updated temperature array (halos unchanged)
+    proc_geom  : (nz, ny, nx) uint8 array  (0=fluid, 1=solid, includes halos)
+    temp       : (nz, ny, nx) float64 array (includes halos)
+    solver     : 1 or 2 = Gauss-Seidel step (ω = 1); 3 = SOR with OMEGA_SOR
+    boundaries : physical-boundary flags (x-, x+, y-, y+, z-, z+), i.e. the
+                 neighbour rank is MPI_PROC_NULL. x/y walls are adiabatic
+                 (λ_face = 0); z faces are Dirichlet on the boundary face
+                 (λ_face = 2λ_cell, T_f = t_hot / t_cold).
+    colour     : None = update every voxel; 0/1 = red-black sweep, only voxels
+                 with (i + j + k) % 2 == colour (interior indices) are updated
+    Returns    : updated temperature array (halos unchanged)
 
     Note: the C++ implementation is Gauss-Seidel (in-place); this Python
     version uses a Jacobi copy for simplicity. Results are identical for
@@ -52,39 +63,38 @@ def heat_update(proc_geom: np.ndarray,
     """
     nz, ny, nx = temp.shape
     lim = HALO
+    omega = OMEGA_SOR if solver == 3 else 1.0
+    xm, xp, ym, yp, zm, zp = boundaries
     temp_new = temp.copy()
+
+    def lam(i, j, k):
+        return cond_fluid if proc_geom[i, j, k] == 0 else cond_solid
 
     for i in range(lim, nz - lim):
         for j in range(lim, ny - lim):
             for k in range(lim, nx - lim):
-                lam_c    = cond_fluid if proc_geom[i,   j,   k  ] == 0 else cond_solid
-                lam_zm_n = cond_fluid if proc_geom[i-1, j,   k  ] == 0 else cond_solid
-                lam_zp_n = cond_fluid if proc_geom[i+1, j,   k  ] == 0 else cond_solid
-                lam_ym_n = cond_fluid if proc_geom[i,   j-1, k  ] == 0 else cond_solid
-                lam_yp_n = cond_fluid if proc_geom[i,   j+1, k  ] == 0 else cond_solid
-                lam_xm_n = cond_fluid if proc_geom[i,   j,   k-1] == 0 else cond_solid
-                lam_xp_n = cond_fluid if proc_geom[i,   j,   k+1] == 0 else cond_solid
+                if colour is not None and (i + j + k - 3 * lim) % 2 != colour:
+                    continue
+                lam_c = lam(i, j, k)
+                faces = [  # (λ_face, T_neighbour)
+                    [harmonic_mean(lam_c, lam(i-1, j, k)), temp[i-1, j, k]],
+                    [harmonic_mean(lam_c, lam(i+1, j, k)), temp[i+1, j, k]],
+                    [harmonic_mean(lam_c, lam(i, j-1, k)), temp[i, j-1, k]],
+                    [harmonic_mean(lam_c, lam(i, j+1, k)), temp[i, j+1, k]],
+                    [harmonic_mean(lam_c, lam(i, j, k-1)), temp[i, j, k-1]],
+                    [harmonic_mean(lam_c, lam(i, j, k+1)), temp[i, j, k+1]],
+                ]
+                if zm and i == lim:          faces[0] = [2.0 * lam_c, t_hot]
+                if zp and i == nz - lim - 1: faces[1] = [2.0 * lam_c, t_cold]
+                if ym and j == lim:          faces[2][0] = 0.0
+                if yp and j == ny - lim - 1: faces[3][0] = 0.0
+                if xm and k == lim:          faces[4][0] = 0.0
+                if xp and k == nx - lim - 1: faces[5][0] = 0.0
 
-                lam_zm = harmonic_mean(lam_c, lam_zm_n)
-                lam_zp = harmonic_mean(lam_c, lam_zp_n)
-                lam_ym = harmonic_mean(lam_c, lam_ym_n)
-                lam_yp = harmonic_mean(lam_c, lam_yp_n)
-                lam_xm = harmonic_mean(lam_c, lam_xm_n)
-                lam_xp = harmonic_mean(lam_c, lam_xp_n)
-
-                delta = (
-                    lam_zm * (temp[i-1, j,   k  ] - temp[i, j, k]) +
-                    lam_zp * (temp[i+1, j,   k  ] - temp[i, j, k]) +
-                    lam_ym * (temp[i,   j-1, k  ] - temp[i, j, k]) +
-                    lam_yp * (temp[i,   j+1, k  ] - temp[i, j, k]) +
-                    lam_xm * (temp[i,   j,   k-1] - temp[i, j, k]) +
-                    lam_xp * (temp[i,   j,   k+1] - temp[i, j, k])
-                )
-
-                if solver == 3:
-                    temp_new[i, j, k] += OMEGA_SOR * DT_HEAT * delta
-                else:
-                    temp_new[i, j, k] += DT_HEAT * delta
+                lam_sum = sum(f[0] for f in faces)
+                if lam_sum > 0.0:
+                    delta = sum(f[0] * (f[1] - temp[i, j, k]) for f in faces)
+                    temp_new[i, j, k] += omega * delta / lam_sum
 
     return temp_new
 
@@ -120,43 +130,77 @@ def compute_mean_flux(proc_geom: np.ndarray,
     return flux_sum / count if count > 0 else 0.0
 
 
+def compute_plane_fluxes(proc_geom: np.ndarray,
+                         temp: np.ndarray,
+                         cond_solid: float,
+                         cond_fluid: float,
+                         t_hot: float = None,
+                         t_cold: float = None):
+    """
+    Mirror of evaluate_heat_flux (evaluation.cc), single rank.
+
+    Total z flux Q_f through every face plane f = 0 .. N_z: the hot and cold
+    boundary faces use conductance 2λ_cell and the Dirichlet values (default
+    T_hot = N_z + 2, T_cold = 2), interior faces the harmonic mean.
+
+    Returns
+    -------
+    (Q, lambda_eff, conv)
+        Q          -- array of N_z + 1 plane fluxes
+        lambda_eff -- mean(Q) / (N_x N_y) * N_z / (T_hot - T_cold)
+        conv       -- max|Q_f - mean(Q)| / |mean(Q)|, or max|Q_f| / (N_x N_y)
+                      if no heat flows
+    """
+    lim = HALO
+    nz, ny, nx = temp.shape
+    Nz, Ny, Nx = nz - 2 * lim, ny - 2 * lim, nx - 2 * lim
+    if t_hot is None:
+        t_hot = Nz + 2.0
+    if t_cold is None:
+        t_cold = 2.0
+
+    lam = np.where(proc_geom == 0, cond_fluid, cond_solid).astype(float)
+    T = temp
+    s = (slice(lim, ny - lim), slice(lim, nx - lim))
+
+    Q = np.zeros(Nz + 1)
+    Q[0] = np.sum(2.0 * lam[lim][s] * (t_hot - T[lim][s]))
+    for i in range(lim, nz - lim - 1):
+        lc, ln = lam[i][s], lam[i + 1][s]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            hm = np.where(lc + ln > 0, 2.0 * lc * ln / (lc + ln), 0.0)
+        Q[i - lim + 1] = np.sum(hm * (T[i][s] - T[i + 1][s]))
+    Q[Nz] = np.sum(2.0 * lam[nz - lim - 1][s] * (T[nz - lim - 1][s] - t_cold))
+
+    area = Nx * Ny
+    q_mean = Q.mean()
+    lambda_eff = q_mean / area * Nz / (t_hot - t_cold)
+    qmax = np.max(np.abs(Q))
+    if abs(q_mean) > 0.0 and abs(q_mean) > 1e-12 * qmax:
+        conv = np.max(np.abs(Q - q_mean)) / abs(q_mean)
+    else:
+        conv = qmax / area
+    return Q, lambda_eff, conv
+
+
 def compute_eff_conductivity(proc_geom: np.ndarray,
                              temp: np.ndarray,
                              cond_solid: float,
                              cond_fluid: float) -> float:
     """
-    Effective thermal conductivity:
+    Effective thermal conductivity (Fourier), see compute_plane_fluxes:
 
-        λ_eff = q̄_z * (L / ΔT)
-
-    With the solver's boundary conditions T_hot = N_z + 2 and T_cold = 2,
-    L = N_z and ΔT = N_z, so L/ΔT = 1 and λ_eff = q̄_z directly.
+        λ_eff = Q̄ / (N_x N_y) * L / ΔT,   L = ΔT = N_z
     """
-    return compute_mean_flux(proc_geom, temp, cond_solid, cond_fluid)
+    return compute_plane_fluxes(proc_geom, temp, cond_solid, cond_fluid)[1]
 
 
 def compute_convergence(proc_geom: np.ndarray,
                         temp: np.ndarray,
-                        flux_prev: float,
                         cond_solid: float,
-                        cond_fluid: float):
-    """
-    Relative change in mean z-flux between successive evaluation steps:
-
-        ε = |q̄_z^(n) - q̄_z^(n-1)| / |q̄_z^(n)|
-
-    Returns
-    -------
-    (conv, flux_new) : (float, float)
-        conv     -- convergence value ε
-        flux_new -- current mean flux (use as flux_prev for next call)
-    """
-    flux_new = compute_mean_flux(proc_geom, temp, cond_solid, cond_fluid)
-    if abs(flux_new) > 0.0:
-        conv = abs(flux_new - flux_prev) / abs(flux_new)
-    else:
-        conv = 0.0
-    return conv, flux_new
+                        cond_fluid: float) -> float:
+    """Plane-flux imbalance max|Q_f - Q̄| / |Q̄| (see compute_plane_fluxes)."""
+    return compute_plane_fluxes(proc_geom, temp, cond_solid, cond_fluid)[2]
 
 
 # ── Communication pattern (initialize.cc) ─────────────────────────────────────
@@ -252,19 +296,19 @@ def write_geometry(geom_interior: np.ndarray, path: str) -> None:
 
 def make_linear_temp(proc_geom_shape, nz_interior: int, starts_z: int = 0) -> np.ndarray:
     """
-    Create a temperature array matching the solver's initial condition:
+    Create a temperature array matching the solver's initial condition,
+    the linear profile between the Dirichlet faces at the cell centres:
 
-        T[i, j, k] = (nz_interior - starts_z - i) + HALO + 2
+        T(z_c) = T_hot - (T_hot - T_cold) * z_c / N_z,   z_c = global index + 0.5
 
-    For a single rank (starts_z=0):
-        T[HALO]              = nz_interior + 2  (T_hot)
-        T[nz_interior+HALO]  = 2                (T_cold)
-
+    with T_hot = N_z + 2, T_cold = 2 (applied to halos as well).
     The gradient T[i] - T[i+1] = 1 for all i.
     """
     lim = HALO
     nz, ny, nx = proc_geom_shape
+    t_hot, t_cold = nz_interior + 2.0, 2.0
     temp = np.empty((nz, ny, nx), dtype=np.float64)
     for i in range(nz):
-        temp[i, :, :] = (nz_interior - starts_z - i) + lim + 2
+        zc = (starts_z + i - lim) + 0.5
+        temp[i, :, :] = t_hot - (t_hot - t_cold) * zc / nz_interior
     return temp

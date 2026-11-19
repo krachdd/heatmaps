@@ -26,24 +26,33 @@ OTHER DEALINGS IN THE SOFTWARE.
  * Date:       2024
  * Contact:    david.krach@mib.uni-stuttgart.de
  *
- * Purpose:    void compute_eff_conductivity:
- *             Compute effective thermal conductivity from mean z-flux.
- *             Analogy to Darcy permeability (Fourier's law):
- *             \f[ \lambda_\mathrm{eff} = \bar{q}_z \cdot \frac{L}{\Delta T} \f]
- *             where \f$ \bar{q}_z = \frac{1}{N}\sum_{i,j,k}
- *             \lambda_\mathrm{face}\,(T_{i,j,k} - T_{i+1,j,k}) \f$
- *             over all interior voxel pairs, \f$ L = N_z \f$,
- *             \f$ \Delta T = T_\mathrm{hot} - T_\mathrm{cold} = N_z \f$.
- *             Since \f$ L/\Delta T = 1 \f$, \f$ \lambda_\mathrm{eff} = \bar{q}_z \f$
- *             in simulation units (same as input conductivities).
+ * Purpose:    double evaluate_heat_flux:
+ *             Total z heat flux Q_f through every z face plane
+ *             f = 0 (hot boundary face) ... N_z (cold boundary face),
+ *             using the same face conductances as the solver
+ *             (harmonic mean inside, 2*lambda_cell on the Dirichlet faces).
  *
- *             double compute_convergence:
- *             Relative change in mean z-flux between evaluation steps:
- *             \f[ \varepsilon = \frac{|\bar{q}_z^{(n)} - \bar{q}_z^{(n-1)}|}{|\bar{q}_z^{(n)}|} \f]
+ *             Effective conductivity (Fourier):
+ *             \f[ \lambda_\mathrm{eff} = \frac{\bar{Q}}{N_x N_y}\,\frac{L}{\Delta T},
+ *                 \quad \bar{Q} = \frac{1}{N_z+1}\sum_f Q_f \f]
+ *
+ *             Convergence (returned): in steady state with adiabatic or
+ *             periodic side walls every plane carries the same flux, so
+ *             \f[ \varepsilon = \max_f \frac{|Q_f - \bar{Q}|}{|\bar{Q}|} \f]
+ *             is a residual measure (differences Q_f - Q_{f-1} are the net
+ *             heat imbalance of the voxel layers). It does not depend on how
+ *             much the field changed since the last check, so a slowly
+ *             converging solver cannot stop prematurely. If no heat flows
+ *             (Q = 0, e.g. non-percolating conductor) the absolute value
+ *             max |Q_f| / (N_x N_y) is returned instead.
  *
  * Contents:
  *
  * Changelog:  Version: 1.0.0
+ *             krach 2026: replaced "relative change of the mean flux between
+ *                         two checks" by the plane-flux balance above;
+ *                         flux evaluated on all faces incl. rank boundaries
+ *                         and Dirichlet faces.
  ***********************************************************************/
 
 
@@ -51,102 +60,83 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include <iostream>
 #include <stdio.h>
 #include <math.h>
+#include <vector>
 #include "mpi.h"
 #include "constants.h"
+#include "evaluation.h"
 // **********************************************************************
 
 
-void compute_eff_conductivity(  bool*** proc_geom,
-                                int* size,
-                                int* new_proc_size,
-                                double*** temp,
-                                double* lambda_eff,
-                                double cond_solid,
-                                double cond_fluid,
-                                MPI_Comm comm_cart,
-                                double voxelsize)
-{
-    int i, j, k;
-    int lim = 2;
-    double flux_sum = 0.0;
-    double vox_count = 0.0;
-
-    // Sum the z-direction heat flux over all interior voxels.
-    // flux at face between (i,j,k) and (i+1,j,k) uses harmonic-mean conductivity.
-    // We skip the last interior layer in z (i=new_proc_size[2]-lim-1) to avoid
-    // reading the ghost layer at i+1, but include it in vox_count.
-    for (i = lim; i < new_proc_size[2] - lim - 1; i++){
-        for (j = lim; j < new_proc_size[1] - lim; j++){
-            for (k = lim; k < new_proc_size[0] - lim; k++){
-                double lam_c = (proc_geom[i][j][k] == 0) ? cond_fluid : cond_solid;
-                double lam_n = (proc_geom[i+1][j][k] == 0) ? cond_fluid : cond_solid;
-                double lam_face = 2.0 * lam_c * lam_n / (lam_c + lam_n);
-                // Heat flux: q_z = -λ dT/dz ≈ λ_face*(T[i] - T[i+1]) > 0
-                // (T decreases with i, so T[i] - T[i+1] > 0 gives positive flux)
-                flux_sum += lam_face * (temp[i][j][k] - temp[i+1][j][k]);
-                vox_count += 1.0;
-            }
-        }
-    }
-
-    // Reduce across all ranks
-    double gbuf[2] = {flux_sum, vox_count};
-    MPI_Allreduce(MPI_IN_PLACE, gbuf, 2, MPI_DOUBLE, MPI_SUM, comm_cart);
-    flux_sum  = gbuf[0];
-    vox_count = gbuf[1];
-
-    // mean_flux_z = sum / N_voxels
-    double mean_flux_z = flux_sum / vox_count;
-
-    // λ_eff = mean_flux_z * (L / ΔT); with L = ΔT = N_z the factor L/ΔT = 1.
-    // Result is in the same units as cond_solid/cond_fluid (W/(m·K) if physical).
-    *lambda_eff = mean_flux_z;
-}
-
-
-double compute_convergence( bool*** proc_geom,
+double evaluate_heat_flux(  bool*** proc_geom,
                             int* size,
                             int* new_proc_size,
                             double*** temp,
-                            double* flux_prev,
                             double cond_solid,
                             double cond_fluid,
-                            MPI_Comm comm_cart)
+                            int* neighbors,
+                            int* starts,
+                            MPI_Comm comm_cart,
+                            double* lambda_eff)
 {
     int i, j, k;
     int lim = 2;
-    double flux_sum = 0.0;
-    double vox_count = 0.0;
-    double conv = 0.0;
+    int nx = new_proc_size[0], ny = new_proc_size[1], nz = new_proc_size[2];
+    int nfaces = size[2] + 1;
+    double T_hot  = t_hot(size);
+    double T_cold = t_cold(size);
+    bool dir_zm = (neighbors[4] == MPI_PROC_NULL);
+    bool dir_zp = (neighbors[5] == MPI_PROC_NULL);
 
-    for (i = lim; i < new_proc_size[2] - lim - 1; i++){
-        for (j = lim; j < new_proc_size[1] - lim; j++){
-            for (k = lim; k < new_proc_size[0] - lim; k++){
-                double lam_c = (proc_geom[i][j][k] == 0) ? cond_fluid : cond_solid;
-                double lam_n = (proc_geom[i+1][j][k] == 0) ? cond_fluid : cond_solid;
-                double lam_face = 2.0 * lam_c * lam_n / (lam_c + lam_n);
-                flux_sum += lam_face * (temp[i][j][k] - temp[i+1][j][k]);
-                vox_count += 1.0;
+    std::vector<double> Q(nfaces, 0.0);
+
+    // hot boundary face (global face 0), owned by the bottom ranks
+    if (dir_zm){
+        for (j = lim; j < ny - lim; j++){
+            for (k = lim; k < nx - lim; k++){
+                double lam_c = (proc_geom[lim][j][k] == 0) ? cond_fluid : cond_solid;
+                Q[0] += 2.0 * lam_c * (T_hot - temp[lim][j][k]);
             }
         }
     }
 
-    // Batch both reductions into one call
-    double cbuf[2] = {flux_sum, vox_count};
-    MPI_Allreduce(MPI_IN_PLACE, cbuf, 2, MPI_DOUBLE, MPI_SUM, comm_cart);
-    flux_sum  = cbuf[0];
-    vox_count = cbuf[1];
-
-    double current_flux = flux_sum / vox_count;
-
-    // Convergence: relative change in mean flux
-    if (fabs(current_flux) > 0.0){
-        conv = fabs(current_flux - *flux_prev) / fabs(current_flux);
+    // face above every local cell layer (global face starts[2] + i - lim + 1);
+    // the face to the next rank uses the (current) halo layer
+    for (i = lim; i < nz - lim; i++){
+        int f = starts[2] + (i - lim) + 1;
+        bool top = (i == nz - lim - 1);
+        double q = 0.0;
+        for (j = lim; j < ny - lim; j++){
+            for (k = lim; k < nx - lim; k++){
+                double lam_c = (proc_geom[i][j][k] == 0) ? cond_fluid : cond_solid;
+                if (top && dir_zp){
+                    q += 2.0 * lam_c * (temp[i][j][k] - T_cold);
+                }
+                else {
+                    double lam_n = (proc_geom[i+1][j][k] == 0) ? cond_fluid : cond_solid;
+                    q += harm_mean(lam_c, lam_n) * (temp[i][j][k] - temp[i+1][j][k]);
+                }
+            }
+        }
+        Q[f] += q;
     }
-    else {
-        conv = 0.0;
-    }
-    *flux_prev = current_flux;
 
-    return conv;
+    MPI_Allreduce(MPI_IN_PLACE, Q.data(), nfaces, MPI_DOUBLE, MPI_SUM, comm_cart);
+
+    double Q_mean = 0.0;
+    for (int f = 0; f < nfaces; f++){ Q_mean += Q[f]; }
+    Q_mean /= (double)nfaces;
+
+    double area = (double)size[0] * (double)size[1];
+    *lambda_eff = Q_mean / area * (double)size[2] / (T_hot - T_cold);
+
+    double dev = 0.0, Qmax = 0.0;
+    for (int f = 0; f < nfaces; f++){
+        dev  = fmax(dev,  fabs(Q[f] - Q_mean));
+        Qmax = fmax(Qmax, fabs(Q[f]));
+    }
+    // relative imbalance; absolute (per unit area) if (almost) no heat flows
+    if (fabs(Q_mean) > 1e-12 * Qmax && fabs(Q_mean) > 0.0){
+        return dev / fabs(Q_mean);
+    }
+    return Qmax / area;
 }

@@ -39,7 +39,11 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 
 void heat_update(   bool*** proc_geom,
+                    int* size,
                     int* new_proc_size,
+                    int* neighbors,
+                    int* starts,
+                    int colour,
                     double*** temp,
                     double cond_solid,
                     double cond_fluid,

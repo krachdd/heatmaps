@@ -35,8 +35,15 @@ OTHER DEALINGS IN THE SOFTWARE.
  ***********************************************************************/
 
 
-void reapply_temp_gradient( int* size,
-                            int* new_proc_size,
-                            double*** temp,
-                            int* cart_coords,
-                            int* dims);
+// Copy the material of the outermost cell layer into the ghost layers on
+// every physical (non-communicating) boundary face.
+void mirror_geom_at_boundaries( bool*** proc_geom,
+                                int* new_proc_size,
+                                int* neighbors);
+
+// Dirichlet T on the z boundary faces, adiabatic x/y walls.
+// Call after every halo exchange.
+void apply_temp_bcs(int* size,
+                    int* new_proc_size,
+                    double*** temp,
+                    int* neighbors);
